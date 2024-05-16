@@ -1,0 +1,117 @@
+Data:
+  data_loc: '/path/to/csv_file' #path to clinical data
+  image_loc: '/path/to/image_directory' #path to image data 
+  key_loc: '/path/to/patient_key_csv' #path to patient key
+  rad_loc: '/path/to/csv_file_with_rad_features' # path to radiomics features (not implemented in this repo)
+  t1_path: 't1_folder_name' # This is appended to image_loc to point to T1 data
+  t2_path: 't2_folder_name' # This is appended to image_loc to point to T2 data
+ImageModel:
+  name: 'densenet121' # Options are 'densenet121', 'monaidensenet', 'tinydensenet', 'densenet201', 'seresnet50', 'r3d18', 'tinycnn' (see below)
+    # densenet121 - Slightly modified densenet121 with customizable number of extracted features
+    # monaidensenet - Vanilla densenet121, no customizable number of features extracted
+    # tinydensenet - Smaller version of densenet121, less powerful, but also faster and less prone to overfitting. Customizable number of features extracted
+    # densenet201 - Vanilla densenet201, no customizable number of extracted features
+    # seresnet50 - Squeeze and Excitation Net - 50 layers - not well tested
+    # r3d18 - 18 Layer 3d resnet, not well tested
+    # tinycnn - tiny 5 layer, 3D, custom mlp - least prone to overfit - not well tested
+
+  modality: 't1t2' # Options are t1, t2, or t1t2 - case insensitive
+  feature_layers: 12 # Number of features to extract (if applicable - only supported for networks that support customizable number of features extracted)
+  num_classes: 2
+  spatial_dims: 3 # 3 for 3D Radiological scans, 2 for pathology (pathology not supported yet)
+  in_channels: 2 # 1 for grayscale images (most), 3 for RGB, supports multispectral data (although it may lead to some weirdness)
+  dropout_prob: 0.2 # Dropout Regularization - Float between 0 and 1. Generally don't go above 0.5, 0.2 or 0.3 are common values
+
+ClinicalModel:
+  HEADERS_TO_CONVERT: # Any categorical columns should be listed here, these will be converted to one hot encoding
+    - 'Sex'
+    - 'Location3'
+    - 'Diagnosis'
+    - 'Chemo (Neoadjuvant)'
+
+  PRE_OP_PREDICTORS: # Clinical predictors for preop model
+    - 'Sex' # need to one hot encode
+    - 'Age'
+    - 'Location3' # need to one hot encode
+    - 'Diagnosis' # OHE
+    - 'Chemo (Neoadjuvant)' #OHE
+    - 'TumorSize'
+    - 'TumorVolume (cm^3)'
+    - 'TumorDepth (1 = deep to fascia, 0 = superficial) '
+    - 'TumorGrade'
+    - 'Metsatpresentation'
+    - 'RT Type (0 = preop, 1 = postop'
+
+  POST_OP_PREDICTORS: # Clinical predictors for postop model (List only predictors specific to postop model, all preop predictors will be included)
+  # Currently unused - future investigation
+    - 'Margin (negative==0, microscopically positive==1, grossly positive==2) '
+    - 'Necrosis % (information not known prior to operation)'
+    - 'LengthOR'
+
+  TARGETS_BINARY: # Binary clinical Targets
+    - 'VitalStatus'
+    - 'Distant metastasis'
+
+  TARGETS_TIME: # Datetime Survival Targets
+    - 'FUtime'
+    - 'Date of Met'
+    - 'Surgery_Date'
+
+  SURVIVAL_START_DATE: 'Surgery_Date' # Column containing start date of followup perioid of survival analysis models
+
+RadiomicsModel:
+  RADIOMICS_EXCLUDE_COLUMNS: # Any radiomics columns you want to exclude from predictor set, we exclude diagnostic features here.
+    - 'diagnostics_Versions_PyRadiomics'
+    - 'diagnostics_Versions_Numpy'
+    - 'diagnostics_Versions_SimpleITK'
+    - 'diagnostics_Versions_PyWavelet'
+    - 'diagnostics_Versions_Python'
+    - 'diagnostics_Configuration_Settings'
+    - 'diagnostics_Configuration_EnabledImageTypes'
+    - 'diagnostics_Image-original_Hash'
+    - 'diagnostics_Image-original_Dimensionality'
+    - 'diagnostics_Image-original_Spacing'
+    - 'diagnostics_Image-original_Size'
+    - 'diagnostics_Image-original_Mean'
+    - 'diagnostics_Image-original_Minimum'
+    - 'diagnostics_Image-original_Maximum'
+    - 'diagnostics_Mask-original_Hash'
+    - 'diagnostics_Mask-original_Spacing'
+    - 'diagnostics_Mask-original_Size'
+    - 'diagnostics_Mask-original_BoundingBox'
+    - 'diagnostics_Mask-original_VoxelNum'
+    - 'diagnostics_Mask-original_VolumeNum'
+    - 'diagnostics_Mask-original_CenterOfMassIndex'
+    - 'diagnostics_Mask-original_CenterOfMass'
+
+  RADIOMICS_LABEL_COLUMNS: # Targets for radiomics classification model
+    - 'VitalStatus'
+    - 'Distant metastasis'
+
+  RADIOMICS_SURV_LABEL_COLUMNS: # Targets for radiomics survival analysis model
+    - 'FUtime'
+    - 'Time_MET'
+
+Preprocessing:
+  UID: 'MRN' # UID must be obtainable for every patient across all datasets (modalities)
+  HEADER_PAIRS: # Relates binary targets to their datetime counterparts for survival targets
+    - ['VitalStatus', 'FUtime']
+    - ['Distant metastasis', 'Time_MET']
+  train_uid_location: './stratified_train_uids.txt' # Location of text file containing uids of patients in training set, use --split to generate new set
+  val_uid_location: './statified_val_uids.txt' # Location of text file containing uids of patients in validation set, use --split to generate new set
+  test_uid_location: './stratified_test_uids.txt'
+  output_dir: 'models' # Directory where model outputs will be stored
+  num_workers: 4 # number of parallel processes for dataloading (0 for no parallelism, num_workers > batch_size just increases overhead, max should be the batch size)
+
+Hyperparameters: # Model hyperparameters
+  epochs: 100
+  learning_rate: 0.0005
+  momentum: 0.9
+  weight_decay: 0.0001
+  train_batch_size: 8
+  test_batch_size: 4
+  seed: 42
+  log_interval: 100
+  num_gpus: 1
+  pretrained_weights: './weights/DenseNet121_BHB-10K_yAwareContrastive.pth' # Pretrained weights used for initialization prior to training
+  model_weights: '/path/to/trained_model.pth' # Trained weights used for inference / evaluation
