@@ -4,6 +4,8 @@ import pandas as pd
 import torch
 from torch.utils.data import Dataset
 
+from data.constants import RADIOMICS_UID
+
 
 class MultiModalDataset(Dataset):
     def __init__(self, datasets, transforms=None):
@@ -56,7 +58,7 @@ class MultiModalDataset(Dataset):
         for dataset in self.datasets:
             if dataset.multimodal_identifier == 'clinical':
                 return dataset
-        raise ValueError('Attempted to retreive a clinical dataset when no dataset has a \'clinical\' multimodal identifier')
+        raise ValueError('Attempted to retreive a clinical dataset when none exists')
     
 class MultiModalSurvivalDataset(MultiModalDataset):
 

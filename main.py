@@ -37,30 +37,15 @@ from losses.GradientBlender import GradientBlender
 from utils.find_lr import find_lr
 from utils.utils import criterion, surv_criterion, save_model, collate_fn, collate_fn_surv, multimodal_collate_fn, multimodal_collate_fn_surv, loadUIDs, FeatureExtractor, Normalize, \
     stratifiedSplit, loadWeights, LossTracker, add_gradcam
-
+import SimpleITK as sitk
 import boto3
-
-'''
-This module serves as the main entry point to the training pipeline.
-
-Four primary functions are implemented in this module
-
-train_classification
-train_survival
-
-inference_classification
-inference_survival
-
-Which implement the training and evaluation loops for the MMNN.
-'''
-
 
 CLASSIFICATION_THRESHOLD = 0.5
 NUM_SURV_FEATURES=50
 SPATIAL_SIZE = (64,64,64)
-NUM_BOOTSTRAP_ITERATIONS = 50
+NUM_BOOTSTRAP_ITERATIONS = 40
 SUPER_BATCH_SIZE=64
-BUCKET_NAME = 'bucket_name'
+
 train_transforms = Compose([
             EnsureChannelFirst(channel_dim=0),
             Normalize(IMAGE_DATA_MEAN, IMAGE_DATA_STDDEV),
@@ -194,6 +179,8 @@ def train_classification(model, train_dataset, val_dataset, args, device):
             step += 1
             inputs, labels = None, None
             #inputs is dimensions BCDHW, targets is dimensions BxNumClass
+
+            
             if not args.multimodal:
                 inputs, labels = batch_data[0].to(device), batch_data[1].to(device)
             else:
@@ -301,6 +288,8 @@ def train_classification(model, train_dataset, val_dataset, args, device):
                     logger.info('saved new best metric model')
                 logger.info(f"current epoch: {epoch + 1} current f1: {mean_f1:.4f}"
                       f" best f1: {best_metric:.4f} at epoch: {best_metric_epoch}")
+                if epoch == 0:
+                    torch.save(model.state_dict(), './epoch1_model.pth')
 
         print(args.blend, (epoch+1) % args.blend_update_interval)
         if args.blend and (epoch + 1) % args.blend_update_interval == 0:
@@ -329,10 +318,7 @@ def train_classification(model, train_dataset, val_dataset, args, device):
 
 def train(args, model, dataset, device):
     
-    '''
-    This function will handle some boilerplate common to classification and survival models, load uids for train and val sets, initialize train & val datasets
-    It will then delegate training to the relevent train loop depending on if the task is survival analysis or classification
-    '''
+    # is_distributed = len(args.hosts) > 1 and args.backend is not None
     is_distributed = False
     logger.debug("Distributed training - {}".format(is_distributed))
 
@@ -365,18 +351,24 @@ def train(args, model, dataset, device):
     try:
         s3 = boto3.resource('s3')
         if args.survival:
-            s3.Bucket(BUCKET_NAME).upload_file('./train_val_loss.png', '{}/train_val_loss.png'.format(args.output_dir))
-            s3.Bucket(BUCKET_NAME).upload_file('./train_val_c_score.png', '{}/train_val_f1.png'.format(args.output_dir))
-            s3.Bucket(BUCKET_NAME).upload_file('./best_surv_model.pth', '{}/model.pth'.format(args.output_dir))
+            s3.Bucket('BUCKETNAME').upload_file('./train_val_loss.png', '{}/train_val_loss.png'.format(args.output_dir))
+            s3.Bucket('BUCKETNAME').upload_file('./train_val_c_score.png', '{}/train_val_f1.png'.format(args.output_dir))
+            s3.Bucket('BUCKETNAME').upload_file('./best_surv_model.pth', '{}/model.pth'.format(args.output_dir))
+            for file in os.listdir('.'):
+                if file.endswith('.nii.gz'):
+                    s3.Bucket.upload_file('./{}'.format(file), 'publication_workspace/{}'.format(file))
             if args.blend:
-                s3.Bucket(BUCKET_NAME).upload_file('./gblend_weights_history.csv', '{}/gblend_weights_history.csv'.format(args.output_dir))
+                s3.Bucket('BUCKETNAME').upload_file('./gblend_weights_history.csv', '{}/gblend_weights_history.csv'.format(args.output_dir))
+                s3.Bucket('BUCKETNAME').upload_file('./train_modality_loss_history.csv', '{}/train_modality_loss_history.csv'.format(args.output_dir))
+                s3.Bucket('BUCKETNAME').upload_file('./test_modality_loss_history.csv', '{}/test_modality_loss_history.csv'.format(args.output_dir))
+
         else:
-            s3.Bucket(BUCKET_NAME).upload_file('./train_val_loss.png', '{}/train_val_loss.png'.format(args.output_dir))
-            s3.Bucket(BUCKET_NAME).upload_file('./train_val_f1.png', '{}/train_val_f1.png'.format(args.output_dir))
-            s3.Bucket(BUCKET_NAME).upload_file('./model.pth', '{}/model.pth'.format(args.output_dir))
-            s3.Bucket(BUCKET_NAME).upload_file('./final_model.pth', '{}/final_model.pth'.format(args.output_dir))
-            s3.Bucket(BUCKET_NAME).upload_file('./val_loss_by_class.png', '{}/val_loss_by_class.png'.format(args.output_dir))
-            s3.Bucket(BUCKET_NAME).upload_file('./val_loss_by_cm.png', '{}/val_loss_by_cm.png'.format(args.output_dir))
+            s3.Bucket('BUCKETNAME').upload_file('./train_val_loss.png', '{}/train_val_loss.png'.format(args.output_dir))
+            s3.Bucket('BUCKETNAME').upload_file('./train_val_f1.png', '{}/train_val_f1.png'.format(args.output_dir))
+            s3.Bucket('BUCKETNAME').upload_file('./model.pth', '{}/model.pth'.format(args.output_dir))
+            s3.Bucket('BUCKETNAME').upload_file('./final_model.pth', '{}/final_model.pth'.format(args.output_dir))
+            s3.Bucket('BUCKETNAME').upload_file('./val_loss_by_class.png', '{}/val_loss_by_class.png'.format(args.output_dir))
+            s3.Bucket('BUCKETNAME').upload_file('./val_loss_by_cm.png', '{}/val_loss_by_cm.png'.format(args.output_dir))
     except Exception as e:
         print('Could not save to s3 bucket - no connection to S3')
         print(e)
@@ -398,8 +390,6 @@ def train_survival(model, train_dataset, val_dataset, args, device):
     epoch_num = args.epochs
     val_interval = 1
     steps_per_epoch=0
-
-    # defining constants relevent to gradient accumulation and LR scheduling
     super_batch_interval = SUPER_BATCH_SIZE /args.batch_size
     if len(train_dataset) % SUPER_BATCH_SIZE == 0:
         steps_per_epoch = int(len(train_dataset) / SUPER_BATCH_SIZE)
@@ -407,6 +397,8 @@ def train_survival(model, train_dataset, val_dataset, args, device):
         steps_per_epoch = 1 + int(len(train_dataset) / SUPER_BATCH_SIZE)
 
     loss_function = CoxPH
+    # loss_function = torch.nn.KLDivLoss(reduction='batchmean') #KL Divergence is a slightly more stable version of CrossEntropy
+    # optimizer = torch.optim.Adam(model.parameters(), args.lr)
     optimizer = torch.optim.SGD(model.parameters(), args.lr,
                                 momentum=args.momentum,
                                 nesterov=True,
@@ -424,16 +416,24 @@ def train_survival(model, train_dataset, val_dataset, args, device):
     epoch_val_loss_values = list()
     train_metric_values = list()
     val_metric_values = list()
+
+    print('Total Number of Parameters: {}'.format(sum([p.numel() for p in model.parameters()])))
+
     for epoch in range(epoch_num):
         logger.info('-' * 10)
         logger.info(f"epoch {epoch + 1}/{epoch_num}")
         model.train()
         epoch_loss = 0
         step = 0
+
+        # if args.blend:
+        #     train_preds = torch.tensor([], dtype=torch.float32, device='cpu')
+        #     train_events = torch.tensor([], dtype=torch.long, device='cpu')
+        #     train_durations = torch.tensor([], dtype=torch.long, device='cpu')
+        #     val_preds = torch.tensor([], dtype=torch.float32, device='cpu')
+        #     val_all_events = torch.tensor([], dtype=torch.long, device='cpu')
+        #     val_all_durations = torch.tensor([], dtype=torch.long, device='cpu')
         
-        # Define some placeholders that will hold our train & val preds & labels
-        # When using gradient blending, they will be used to calculate gblend weight updates
-        # When not using gradient blending - these aren't strictly necessary but we're using them to track train&val loss over the course of training
         with torch.no_grad():
             c_pred = torch.tensor([], dtype=torch.float32, device=device)
             c_events = torch.tensor([], dtype=torch.long, device=device)
@@ -444,9 +444,9 @@ def train_survival(model, train_dataset, val_dataset, args, device):
 
         for i, batch_data in enumerate(train_loader):
 
+            # Set input_validation = 1 to output cropped volumes for manual verification in 3D slicer / OHIF
             step += 1
-
-            # Sends data to GPU
+        
             if not args.multimodal:
                 inputs, events, durations = batch_data[0].to(device), batch_data[1].to(device), batch_data[2].to(device)
             else:
@@ -456,31 +456,22 @@ def train_survival(model, train_dataset, val_dataset, args, device):
                 events = batch_data[1].to(device)
                 durations = batch_data[2].to(device)
             
-            # Forward pass
             outputs = model(inputs)
-
-            # Compute loss
             if args.blend:
                 loss, _ = gradient_blender.computeLoss(outputs, events, durations)
             else:
                 loss = surv_criterion(loss_function, outputs, events, durations, device)
 
-            # Backward pass
             loss.backward()
-
-            # Logging
             epoch_loss += loss.item()
             batch_loss = loss.item() / args.batch_size
             logger.info(f"{step}/{1+len(train_loader.dataset) // train_loader.batch_size}, train_loss: {batch_loss:.4f}")
 
-            # gradient accumulation prior to stepping optimizer
-            # step on the super batch interval and on the last batch of an epoch
             if (i+1) % super_batch_interval == 0 or i == len(train_loader) - 1:
                 optimizer.step()
+                epoch_len = len(train_loader.dataset) // train_loader.batch_size
                 scheduler.step()
                 optimizer.zero_grad()
-
-            # Log train preds & labels
             if args.blend:
                 c_pred = torch.cat([c_pred, outputs.detach()], dim=1)
                 c_events = torch.cat([c_events, events.detach()], dim=0)
@@ -490,27 +481,21 @@ def train_survival(model, train_dataset, val_dataset, args, device):
                 c_pred = torch.cat([c_pred, outputs.detach()], dim=0)
                 c_events = torch.cat([c_events, events.detach()], dim=0)
                 c_durations = torch.cat([c_durations, durations.detach()], dim=0)
-        
-        # Compute c-index on train set
+
         if args.blend:
             train_c_index = getCIndices(c_pred[0,...].cpu(), c_events.cpu(), c_durations.cpu())
         else:
             train_c_index = getCIndices(c_pred.cpu(), c_events.cpu(), c_durations.cpu())
         
-        # store c-index for logging purposes
+        
         train_metric_values.append(np.mean(train_c_index))
 
         epoch_loss /= len(train_dataset)
         epoch_train_loss_values.append(epoch_loss)
         logger.info(f"epoch {epoch + 1} average loss: {epoch_loss:.4f}")
-
-        # Validation
         if (epoch + 1) % val_interval == 0:
             model.eval()
-
             with torch.no_grad():
-
-                # Clear tensors holding previous validation data
                 y_pred = torch.tensor([], dtype=torch.float32, device=device)
                 y_events = torch.tensor([], dtype=torch.long, device=device)
                 y_durations = torch.tensor([], dtype=torch.long, device=device)
@@ -519,7 +504,6 @@ def train_survival(model, train_dataset, val_dataset, args, device):
                 for val_data in val_loader:
                     test_step+=1
 
-                    # Send data to gpu
                     if not args.multimodal:
                         val_images, val_events, val_durations = val_data[0].to(device), val_data[1].to(device), val_data[2].to(device)
                     else:
@@ -529,19 +513,16 @@ def train_survival(model, train_dataset, val_dataset, args, device):
                         val_events = val_data[1].to(device)
                         val_durations = val_data[2].to(device)
 
-                    # forward pass
                     preds = model(val_images)
-
-                    # loss computation
                     if args.blend:
                         loss, selection_loss = gradient_blender.computeLoss(preds, val_events, val_durations)
+                        
                     else:
                         loss = surv_criterion(loss_function, preds, val_events, val_durations, device).item()
                         selection_loss = loss
 
                     test_loss += loss
 
-                    # Cat preds along the batch dimension
                     if args.blend:
                         y_pred = torch.cat([y_pred, preds], dim=1)
                     else:
@@ -549,14 +530,10 @@ def train_survival(model, train_dataset, val_dataset, args, device):
                     y_events = torch.cat([y_events, val_events], dim=0)
                     y_durations = torch.cat([y_durations, val_durations], dim=0)
 
-                # Move these to cpu so they aren't eating up VRAM
                 y_pred = y_pred.cpu()
                 y_events = y_events.cpu()
                 y_durations = y_durations.cpu()
-
-                # Compute c-indices
                 if args.blend:
-                    # If using gblend - we only care about the cindex of predictions made by the multimodal output head, which always has index 0 in the first dimension
                     c_indices = getCIndices(y_pred[0, ...].numpy(), y_events.numpy(), y_durations.numpy())
                 else:
                     c_indices = getCIndices(y_pred.numpy(), y_events.numpy(), y_durations.numpy())
@@ -569,7 +546,6 @@ def train_survival(model, train_dataset, val_dataset, args, device):
                 epoch_val_loss_values.append(test_loss/len(val_dataset))
                 print('validation loss: {}'.format(test_loss/len(val_dataset)))
 
-                # The selection loss is the unweighted component of the multimodal output head loss
                 if selection_loss < best_loss:
                     best_loss = selection_loss
                     best_loss_epoch = epoch + 1
@@ -579,8 +555,6 @@ def train_survival(model, train_dataset, val_dataset, args, device):
                 logger.info(f"current epoch: {epoch + 1} current loss: {selection_loss:.4f}"
                       f" best loss: {best_loss:.4f} at epoch: {best_loss_epoch}"
                       f" best c_indices: {best_c_indexes} with mean: {np.mean(best_c_indexes):.3f}")
-                
-        # Update gradient blender weights
         if args.blend and (epoch + 1) % args.blend_update_interval == 0:
             print('Updating gradient blender weights')
 
@@ -602,7 +576,7 @@ def train_survival(model, train_dataset, val_dataset, args, device):
 
 
 
-def inference(args, model, dataset, device, save_probs=True):
+def inference(args, model, dataset, device, save_probs=True, save_features=True):
 
     model.eval()
     # send model to device
@@ -745,7 +719,27 @@ def inference(args, model, dataset, device, save_probs=True):
         probs_and_labels = np.concatenate((np.array(uids)[..., None].astype(int), y_probs, y_copy), axis=1)
         df = pd.DataFrame(probs_and_labels)
         df.to_csv('model_probabilities.csv', index=False)
+        # print(df)
+    if save_features:
+        all_flattened_features = all_flattened_features.cpu().detach().numpy()
+        all_reduced_features = all_reduced_features.cpu().detach().numpy()
+        y = y.cpu().detach().numpy()
 
+        print(np.array(uids)[..., None].shape, all_flattened_features.shape, y.shape)
+        flattened_features_and_labels = np.concatenate((np.array(uids)[..., None].astype(int), all_flattened_features, y), axis=1)
+        reduced_features_and_labels = np.concatenate((np.array(uids)[..., None].astype(int), all_reduced_features, y), axis=1)
+        uid_headers = ['MRN']
+        flattened_headers = ['feature{}'.format(x) for x in range(all_flattened_features.shape[1])]
+        reduced_headers = ['feature{}'.format(x) for x in range(all_reduced_features.shape[1])]
+        label_headers = ['VS_GT', 'DM_GT']
+
+        flattened_df = pd.DataFrame(flattened_features_and_labels, columns=uid_headers + flattened_headers + label_headers)
+        reduced_df = pd.DataFrame(reduced_features_and_labels, columns=uid_headers + reduced_headers + label_headers)
+
+        flattened_df.to_csv('all_features.csv', index=False)
+        reduced_df.to_csv('reduced_features.csv', index=False)
+    # return predictions
+    return None
 
 def inference_survival(args, model, dataset, device, save_preds=True):
 
@@ -753,8 +747,10 @@ def inference_survival(args, model, dataset, device, save_preds=True):
     # send model to device
     model = model.to(device)
 
+    print('Total Number of Parameters: {}'.format(sum([p.numel() for p in model.parameters()])))
+
     # load validation uids from txt
-    uids  = loadUIDs(args.train_uid_location)
+    uids  = loadUIDs(args.test_uid_location)
 
     collater = None
     if args.multimodal:
@@ -782,9 +778,9 @@ def inference_survival(args, model, dataset, device, save_preds=True):
         val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=1, shuffle=False, collate_fn=collater)#, num_workers=args.num_workers, pin_memory=True)
         
         # with torch.no_grad(): - need gradients enabled for gradcam to work
-        y_pred = torch.tensor([], dtype=torch.float32, device=device)
-        y_events = torch.tensor([], dtype=torch.float32, device=device)
-        y_durations = torch.tensor([], dtype=torch.float32, device=device)
+        y_pred = torch.tensor([], dtype=torch.float32, device='cpu')
+        y_events = torch.tensor([], dtype=torch.float32, device='cpu')
+        y_durations = torch.tensor([], dtype=torch.float32, device='cpu')
 
         # inference loop
         for i, val_data in enumerate(val_loader):
@@ -808,9 +804,9 @@ def inference_survival(args, model, dataset, device, save_preds=True):
             else:
                 preds, att_maps = model(val_images)
 
-            y_events = torch.cat([y_events, val_events], dim=0)
-            y_pred = torch.cat([y_pred, preds], dim=0)
-            y_durations = torch.cat([y_durations, val_durations], dim=0)
+            y_events = torch.cat([y_events, val_events.cpu().detach()], dim=0)
+            y_pred = torch.cat([y_pred, preds.cpu().detach()], dim=0)
+            y_durations = torch.cat([y_durations, val_durations.cpu().detach()], dim=0)
 
             # This section will handle attention maps
             if not args.no_gradcam:
@@ -844,9 +840,9 @@ def inference_survival(args, model, dataset, device, save_preds=True):
                         lines = [str(pred.item()) for pred in preds[j, ...]]
                         [f.write(line) for line in lines]
         
-        y_pred = y_pred.cpu().detach().numpy()
-        y_events = y_events.cpu().detach().numpy()
-        y_durations = y_durations.cpu().detach().numpy()
+        y_pred = y_pred.numpy()
+        y_events = y_events.numpy()
+        y_durations = y_durations.numpy()
         
         try:
 
@@ -867,7 +863,7 @@ def inference_survival(args, model, dataset, device, save_preds=True):
             if save_preds:
 
                 preds_and_labels = np.concatenate((np.array(uids)[..., None].astype(int), y_pred, y_events, y_durations), axis=1)
-                cls_headers = ['VS', 'DM']
+                cls_headers = ['VS', 'DM']#, 'GT']
                 pred_headers = [x+'_pred' for x in cls_headers]
                 event_headers = [x+'_event' for x in cls_headers]
                 duration_headers = [x+'_duration' for x in cls_headers]
@@ -875,16 +871,21 @@ def inference_survival(args, model, dataset, device, save_preds=True):
                 headers = ['MRN'] + pred_headers + event_headers + duration_headers
                 df = pd.DataFrame(preds_and_labels, columns=headers)
                 df.to_csv('survival_model_predictions.csv', index=False)
-                s3 = boto3.resource('s3')
-                s3.Bucket(BUCKET_NAME).upload_file('./survival_model_predictions.csv', '{}/survival_model_predictions.csv'.format(args.output_dir))
-                print('uploaded to {}/survival_model_predictions.csv'.format(args.output_dir))
-                
+                # s3 = boto3.resource('s3')
+                # s3.Bucket('BUCKETNAME').upload_file('./survival_model_predictions.csv', '{}/survival_model_predictions.csv'.format(args.output_dir))
+                # print('uploaded to {}/survival_model_predictions.csv'.format(args.output_dir))
+                # print(df)
     if args.bootstrap:
         c_indices = np.array(all_c_indices)
         means = np.mean(c_indices, axis=0)
         stds = np.std(c_indices, axis=0)
         print('Mean c indices: {}'.format(means))
         print('Std. devs: {}'.format(stds))
+        # print(all_c_indices.shape)
+        print(all_c_indices)
+        print(sorted([x[0] for x in all_c_indices]))
+        print('95% CIs VS assume 40 iterations [{}, {}]'.format(sorted([x[0] for x in all_c_indices])[1], np.sort([x[0] for x in all_c_indices])[-2]))
+        print('95% CIs DM assume 40 iterations [{}, {}]'.format(sorted([x[1] for x in all_c_indices])[1], np.sort([x[1] for x in all_c_indices])[-2]))
 
 def str_to_bool(arg):
     if arg.lower() == 'false':
@@ -900,13 +901,14 @@ if __name__ == '__main__':
     argparser.add_argument('--postop', action='store_true', help='Use dataset consisting of clinical features available pre and post operation')
     argparser.add_argument('--radiomics', action='store_true', help='Use dataset consisting of extracted radiomic features')
     argparser.add_argument('--images', action='store_true', help='Use dataset consisting of image data')
-    argparser.add_argument('--classification', action='store_true', help='Binary classificiation for Survival & DM')
-    argparser.add_argument('--survival', action='store_true', help='Time to Event model for survival & DM')
+    argparser.add_argument('--pathology', action='store_true', help='Use dataset consisting of wsi data')
+    argparser.add_argument('--classification', action='store_true', help='Binary classificiation for Survival, LR, DM, and Reop')
+    argparser.add_argument('--survival', action='store_true', help='Time to Event model for survival, LR, DM, and Reop')
     argparser.add_argument('--segmentation', action='store_true', help='Perform tumor segmentation')
     argparser.add_argument('--lr_finder', action='store_true', help='Run LR finder to find good initial learning rate see (Smith 2015) Cyclical Learning Rates for Training Neural Networks')
     argparser.add_argument('--no_gradcam', action='store_true', help='Disable gradcam for inference')
 
-    # String equivalent booleans for sagemaker since sagemaker doesn't support action args
+    # String equivalent booleans for sagemaker
     argparser.add_argument('--use_images', type=str, default='false', help='Same as --images, for use with sagemaker')
     argparser.add_argument('--use_preop', type=str, default='false', help='Same as --preop, for use with sagemaker')
     argparser.add_argument('--use_postop', type=str, default='false', help='same as --postop, for use with sagemaker')
@@ -914,6 +916,8 @@ if __name__ == '__main__':
     argparser.add_argument('--inference_task', type=str, default='false', help='Same as --inference, for use with sagemaker')
     argparser.add_argument('--survival_task', type=str, default='false', help='Same as --survival, for use with sagemaker')
     argparser.add_argument('--use_blend', type=str, default='false', help='Use gradient blending in multimodal models')
+    argparser.add_argument('--no_gradcam_sm', type=str, default='false', help='Disable gradcam during inference')
+    argparser.add_argument('--bootstrap_sm', type=str, default = 'false' , help='bootstrap metrics during inference')
     
     argparser.add_argument('--weights', type=str, default='./weights/DenseNet121_BHB-10K_yAwareContrastive.pth', help='Path to pretrained weights')
     argparser.add_argument('--output_path', type=str, default='.', help='Directory for storing outputs')
@@ -921,17 +925,17 @@ if __name__ == '__main__':
     
     argparser.add_argument('--inference', action='store_true', help='Inference using validation set')
 
-    argparser.add_argument('--data_loc', type=str, help='path to clinical data')
-    argparser.add_argument('--image_loc', type=str, help='path to image data')
-    argparser.add_argument('--key_loc', type=str, help='path to patient key')
-    argparser.add_argument('--rad_loc', type=str, help='path to radiomic features')
+    argparser.add_argument('--data_loc', type=str, default='sample_dataset/clinical/sts_clinical_data.csv', help='path to clinical data')
+    argparser.add_argument('--image_loc', type=str, default='../prepost_compiled_data_unclean', help='path to image data')
+    argparser.add_argument('--key_loc', type=str, default='../patient_key.csv', help='path to patient key')
+    argparser.add_argument('--rad_loc', type=str, default='sample_dataset/radiomics/intermediate_radiomic_features.csv', help='path to radiomic features')
 
     argparser.add_argument('--epochs', type=int, default=25, help='Number of epochs')
     argparser.add_argument('--lr', type=float, default=5E-4, help='Learning rate')
     argparser.add_argument('--split', action='store_true', help='Use this flag to create a new dataset split, otherwise will load existing')
     argparser.add_argument('--train_uid_location', type=str, default='./stratified_train_uids.txt', help='location of list of train uids')
     argparser.add_argument('--val_uid_location', type=str, default='./stratified_val_uids.txt', help='location of list of val uids')
-    argparser.add_argument('--config', type=str, default='./config.yaml', help='Path to YAML configuration file (see example)')
+    argparser.add_argument('--config', type=str, default='./s3config.yaml', help='Path to YAML configuration file (see example)')
     argparser.add_argument('--blend', action='store_true', help='Use Gradient blending method during training, only applicable for multimodal model')
     argparser.add_argument('--blend_update_interval', type=int, default=5, help='Number of epochs before updating gradient blending weights')
     argparser.add_argument('--bootstrap', action='store_true', help='Bootstrap evaluation')
@@ -945,13 +949,20 @@ if __name__ == '__main__':
     args.preop = args.preop or str_to_bool(args.use_preop)
     args.postop = args.postop or str_to_bool(args.use_postop)
     args.blend = args.blend or str_to_bool(args.use_blend)
-
-    assert not all([args.classification, args.survival, args.segmentation]), 'Can only specify one of --classification , --survival , or --segmentation'
-    assert any([args.classification, args.survival, args.segmentation]), 'Must specify one of --classification , --survival , or --segmentation'
-    assert any([args.train, args.test, args.inference]), 'Must specify atleast one of --train, --test, --inference'
+    args.bootstrap = args.bootstrap or str_to_bool(args.bootstrap_sm)
+    args.no_gradcam = args.no_gradcam or str_to_bool(args.no_gradcam_sm)
 
     configparser = Parser(args.config)
     config = configparser.parseConfig()
+
+    # assert not (args.preop and args.postop), 'Can only specify one of --preop or --postop (using --postop will include both preop and postop features)'
+    # assert not all([args.classification, args.survival, args.segmentation]), 'Can only specify one of --classification , --survival , or --segmentation'
+    # assert any([args.classification, args.survival, args.segmentation]), 'Must specify one of --classification , --survival , or --segmentation'
+    # # assert any([args.train, args.test, args.inference]), 'Must specify atleast one of --train, --test, --inference'
+
+    # datasets = getDatasets(args)
+
+    # assert not len(datasets) == 0, 'Must specifiy a dataset to use (main.py -h to see options)'
 
     image_path = None
     if args.images:
@@ -995,7 +1006,7 @@ if __name__ == '__main__':
     use_cuda = model_args.num_gpus > 0 and torch.cuda.is_available()
     logger.debug("Number of gpus available - {}".format(model_args.num_gpus))
     logger.debug('Cuda Available - {}'.format(torch.cuda.is_available()))
-    kwargs = {'num_workers': 10, 'pin_memory': True} if use_cuda else {}
+    kwargs = {'num_workers': 8, 'pin_memory': True} if use_cuda else {}
     device = torch.device("cuda" if use_cuda else "cpu")
 
     if args.inference:

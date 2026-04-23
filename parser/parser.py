@@ -2,16 +2,17 @@ import yaml
 import os
 import logging
 
-from models.resnet import r3d_18
+from models.resnet import r3d_18, ResNet50
 from models.densenet import DenseNet121, TinyDensenet, TinyCNN
 from models.multimodal import MultiModalModel
 from monai.networks.nets import DenseNet121 as monaidensenet
 from monai.networks.nets import Densenet201, SEResNet50
+from models.mlp import MLP
 from exceptions.exceptions import *
 
 from data.ClinicalDatasets import PreopClassificationDataset, PreopSurvivalDataset, PostopClassificationDataset, PostopSurvivalDataset
 from data.ImageDatasets import ImageSurvivalDataset, ImageClassificationDataset, ImageSegmentationDataset, ImageDatasetByUIDs, \
-    S3NiftiImageDataset, NiftiImageDataset, NiftiSurvivalDataset, S3DicomDataset, T1T2ImageDataset, T1T2SurvivalDataset
+    S3NiftiImageDataset, NiftiImageDataset, NiftiSurvivalDataset, S3DicomDataset, T1T2ImageDataset, T1T2SurvivalDataset, S3WSISurvivalDataset
 from data.RadiomicsDatasets import RadiomicsClassificationDataset, RadiomicsSurvivalDataset
 from data.MultiModalDatasets import MultiModalDataset, MultiModalSurvivalDataset
 import botocore
@@ -19,11 +20,6 @@ import botocore
 logger = logging.getLogger(__name__)
 
 class Parser:
-
-    '''
-    This class is used to parse model & dataset configuration information.
-    Instantiates relevent objects based on the configuration information provided.
-    '''
 
     def __init__(self, config_path):
         self.config_path = config_path
@@ -64,6 +60,7 @@ class Parser:
                     # Use our development set if we're running locally
                     except (botocore.exceptions.NoCredentialsError, botocore.exceptions.ClientError) as e:
                         datasets.append(ImageClassificationDataset(image_path, self.config['Data']['data_loc'], self.config['Data']['key_loc']))
+
         if args.survival:
             if args.preop:
                 datasets.append(PreopSurvivalDataset(self.config['Data']['data_loc']))
@@ -81,6 +78,8 @@ class Parser:
                 else:
                     datasets.append(NiftiSurvivalDataset(image_path, self.config['Data']['data_loc'], self.config['Data']['key_loc']))
 
+            if args.pathology:
+                datasets.append(S3WSISurvivalDataset(self.config['PathologyModel']['image_path'], self.config['Data']['data_loc'], self.config['Data']['key_loc']))
         if args.segmentation:
             datasets.append(ImageSegmentationDataset(self.config['Data']['image_loc']))
 
@@ -154,8 +153,28 @@ class Parser:
             raise ConfigurationError('Model name not recognized: {}\n\tSee config file for valid options'.format(model_name))
         
         logger.info('Successfully loaded configured model: {}'.format(model_name))
+
+
+        ## Pathology model
+        # TODO Remove hardcoded values
+        path_model = MLP(10000, self.config['ImageModel']['num_classes'], self.config['ImageModel']['feature_layers'])
+
+
+        # path_model_name = self.config['PathologyModel']['name'].lower()
+        # if path_model_name.startswith('densenet121'):
+        #     path_model = DenseNet121(
+        #         spatial_dims=self.config['PathologyModel']['spatial_dims'],
+        #         in_channels=self.config['PathologyModel']['in_channels'],
+        #         out_channels=self.config['PathologyModel']['num_classes'],
+        #         feature_channels=self.config['PathologyModel']['feature_layers'],
+        #         dropout_prob=self.config['PathologyModel']['dropout_prob']
+        #     )
+        # elif path_model_name.startswith('resnet50'):
+        #     path_model = ResNet50(self.config['PathologyModel']['num_classes'])
+
+
         
-        if args.images and args.preop:
+        if args.images and args.preop and not args.pathology:
             assert model_name.startswith('tinycnn') or model_name.startswith('tinydensenet') or model_name.startswith('densenet121'), \
             'Image models used to build multimodal models must be one of \'tinycnn\', \'tinydensenet\' or \'densenet121\''
 
@@ -165,6 +184,19 @@ class Parser:
                 self.config['ImageModel']['num_classes'], 
                 self.config['ImageModel']['feature_layers'],
                 blend = args.blend
+            )
+
+        elif args.images and args.preop and args.pathology:
+            assert model_name.startswith('tinycnn') or model_name.startswith('tinydensenet') or model_name.startswith('densenet121'), \
+            'Image models used to build multimodal models must be one of \'tinycnn\', \'tinydensenet\' or \'densenet121\''
+
+            model = MultiModalModel(
+                model, 
+                self.config['ClinicalModel']['PRE_OP_PREDICTORS'],
+                self.config['ImageModel']['num_classes'], 
+                self.config['ImageModel']['feature_layers'],
+                blend = args.blend,
+                pathology_model = path_model
             )
 
         elif args.images and args.postop:
@@ -180,6 +212,25 @@ class Parser:
             )
 
         return model
+
+    def getPathologyModel(self, args):
+        model = None
+
+        if self.config is None:
+            raise InitializationError('Attempted to load model prior to parsing config parameters, config must be parsed prior to loading model')
+        
+
+        # model_name = self.config['PathologyModel']['name'].lower()
+        # if model_name.startswith('densenet121'):
+        #     model = DenseNet121(
+        #         spatial_dims=self.config['PathologyModel']['spatial_dims'],
+        #         in_channels=self.config['PathologyModel']['in_channels'],
+        #         out_channels=self.config['PathologyModel']['num_classes'],
+        #         feature_channels=self.config['PathologyModel']['feature_layers'],
+        #         dropout_prob=self.config['PathologyModel']['dropout_prob']
+        #     )
+        # elif model_name.startswith('resnet50'):
+        #     model = ResNet50(self.config['PathologyModel']['num_classes'])
     
     def getImagePath(self):
         modality = self.config['ImageModel']['modality'].lower()

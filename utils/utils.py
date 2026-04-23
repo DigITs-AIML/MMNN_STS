@@ -91,12 +91,16 @@ def multimodal_collate_fn(data):
     new_data = {}
     images = [data['image'] for data in mm_data]
     clinical = [data['clinical'] for data in mm_data]
+    pathology = [data['wsi'] for data in mm_data]
+
     new_data['image'] = torch.stack(images)
     new_data['clinical'] = torch.stack(clinical)
+    new_data['wsi'] = torch.stack(pathology)
     targets = torch.stack(targets)
 
     new_data['image'] = new_data['image'].to(torch.float32)
     new_data['clinical'] = new_data['clinical'].to(torch.float32)
+    new_data['pathology'] = new_data['pathology'].to(torch.float32)
 
     new_data['image'] = convert_to_tensor(new_data['image'])
 
@@ -109,10 +113,17 @@ def multimodal_collate_fn_surv(data):
     durations = torch.stack(durations)
     images = [data['image'] for data in mm_data]
     clinical = [data['clinical'] for data in mm_data]
+    pathology = [data['wsi'] for data in mm_data]
+
+    print(type(images), type(clinical), type(pathology))
+
     new_data['image'] = torch.stack(images)
     new_data['clinical'] = torch.stack(clinical)
+    new_data['wsi'] = torch.stack(pathology)
+
     new_data['image'] = new_data['image'].to(torch.float32)
     new_data['clinical'] = new_data['clinical'].to(torch.float32)
+    new_data['wsi'] = new_data['wsi'].to(torch.float32)
 
     new_data['image'] = convert_to_tensor(new_data['image'])
 
@@ -121,14 +132,11 @@ def multimodal_collate_fn_surv(data):
 
 def stratifiedSplit(dataset, multimodal=False):
     if multimodal:
-        # if a multimodal dataset was passed
         return _stratifiedSplit(dataset.clinical_dataset.data, dataset.clinical_dataset.targets, dataset.uids)
     else:
         try:
-            # if a clinical dataset was passed
             return _stratifiedSplit(dataset.data, dataset.targets, dataset.uids)
         except:
-            # if an image dataset was passed
             return _stratifiedSplit(dataset.classification_dataset.data, dataset.classification_dataset.targets, dataset.uids)
 
 
@@ -238,7 +246,7 @@ class FeatureExtractor(nn.Module):
 class BackpropagatableFeatureExtractor(nn.Module):
     # Enforces stricter model definitions compared to FeatureExtractor, but allows model to be trained through backpropagation
     # The reason this is needed is because the original feature extractor utilizes forward hooks, whose callbacks are only initiated after the models forward pass
-    # Utilizing those callbacks inside of the forward pass is causing weirdness, so this class forgoes using hooks/callbacks at the expense of enforcing a 
+    # Utilizing those callbacks inside of a forward pass is causing weirdness, so this class forgoes using hooks/callbacks at the expense of enforcing a 
     # specific structure for the model
 
     # Assumes model is broken into at least two sequential parts, 'backbone', and 'features'
@@ -252,8 +260,7 @@ class BackpropagatableFeatureExtractor(nn.Module):
 
 class MultiModalGradCAM(nn.Module):
     '''
-    Custom GradCAM implementation for use with multimodal models - 3rd party solutions assume sequential CNN architectures.
-    Generally, they do not support multimodal architectures or survival analysis models
+    Custom GradCAM implementation for use with multimodal models - 3rd party solutions do not support multimodal architectures or survival analysis models
     '''
 
     def __init__(self, model):
@@ -266,10 +273,7 @@ class MultiModalGradCAM(nn.Module):
         for layer in self.layers:
             if isinstance(layer, nn.Conv3d):
                 self.layer = layer
-
-        # Throw some hooks onto the final conv layer that will capture
-        #   1. Activations during the forward pass - stored in self.features
-        #   2. Gradients during the backward pass  - stored in self.grads
+            
         self.layer.register_full_backward_hook(self.save_grads_hook())
         self.layer.register_forward_hook(self.save_outputs_hook())
 
@@ -293,15 +297,8 @@ class MultiModalGradCAM(nn.Module):
     def attentionMaps(self, outputs):
         activations = self.features
         att_maps= []
-
-        # Create one attention map for each class
         for cls in range(outputs.shape[1]):
-
-            # We assume this function was only called after a forward pass and self.features is already populated
-            # Run a backward pass so self.grads is populated - retain the graph since we need to run separate backward passes for each class
             outputs[0, cls].backward(retain_graph=True)
-
-            # Capture gradients from the hook
             grads = self.grads
 
             # pooled gradient across channels
@@ -316,29 +313,30 @@ class MultiModalGradCAM(nn.Module):
             # average across channels
             heatmap = torch.mean(activations, dim=1).squeeze()
 
+            # relu the heatmap
+            # heatmap = F.relu(heatmap)
             heatmap_min = torch.min(heatmap)
-            heatmap = heatmap - heatmap_min
+            heatmap = heatmap + heatmap_min
 
             # normalize
             heatmap /= torch.max(heatmap)
 
             att_map = heatmap.squeeze()
 
-            # if our attention map includes a batch dimension - this should really throw an error. We don't want to compute attention maps for multiple
+            # if our attention map includes a batch dimension - this should throw an error. We don't want to compute attention maps for multiple
             # input images at a single time
             # att_map should have 3 dimensions, one for each spatial dimension of the input image 
             # For testing though, we'll just select the first image in the batch
-            # if att_map.ndim == 4:
-            #     att_map = att_map[0,...]
-
-            assert att_map.ndim == 3, 'Batch dimension found in attention map - Must use batch size 1 when computing attention maps'
+            if att_map.ndim == 4:
+                att_map = att_map[0,...]
 
             # temporarily add in Batch and Channel dimensions so that pytorch will know all of our current dimensions are spatial
-            # Needed for interpolation, but they'll need to be squeezed out
+            # These need to be squeezed out later
             att_map = att_map[None, None, ...]
             att_map = F.interpolate(att_map, self.input_shape[2:], mode='trilinear').squeeze()
             
 
+            # print(att_map.shape)
             att_maps.append(att_map)
 
         return att_maps
@@ -353,6 +351,29 @@ class Normalize(Transform):
     def __call__(self, image):
         # normalization formula is img = (img - mean * max_pixel_value) / (std * max_pixel_value)
         return (image - self.mean * np.max(image)) / (self.stddev * np.max(image))
+
+# class CoxPHMultiLoss(Loss):
+#     def forward(self, input, target, event, weights=None):
+#         # Compute the log-rank statistic for each label
+#         num_labels = target.shape[1]
+#         log_ranks = torch.zeros(num_labels, dtype=torch.float, device=input.device)
+#         for i in range(num_labels):
+#             # Get the observed and censored event times for this label
+#             idx = target[:, i].argsort(descending=True)
+#             T_i = target[idx, i]
+#             E_i = event[idx, i]
+            
+#             # Compute the log-rank statistic for this label
+#             n_i = E_i.sum()
+#             S_i = E_i.cumsum(dim=0)
+#             log_ranks[i] = (input[idx, i] * E_i).sum() - torch.log(S_i).sum() * input.shape[0] / n_i
+        
+#         # Apply weights to the log-rank statistics
+#         if weights is not None:
+#             log_ranks *= weights
+        
+#         # Compute the negative average log-likelihood loss
+#         return -log_ranks.mean()
     
 def loadWeights(model, path, device):
     try:
@@ -370,8 +391,7 @@ def loadWeights(model, path, device):
                 new_checkpoint = {}
                 checkpoint = torch.load(path, map_location=device)
 
-                # This block will modify the keys of the DenseNet121 pretrained model 
-                # to align with keys of the monai implementation of densenet121 so things will load properly
+                # This will modify the keys of the pretrained model to align with keys of the monai densenet implementation
                 for key in checkpoint['model'].keys():
                     new_key = key.replace('module.', '')
                     heirarchy = new_key.split('.')
@@ -390,11 +410,6 @@ def loadWeights(model, path, device):
     return model
 
 class LossTracker:
-
-    '''
-    Class used to find sources of loss. Useful in debugging convergence issues.
-    
-    '''
     def __init__(self):
         self.tp_loss = []
         self.fp_loss = []
@@ -427,6 +442,7 @@ class LossTracker:
 
         self.vs_loss.append(torch.mean(loss[:, 0]).item())
         self.dm_loss.append(torch.mean(loss[:, 1]).item())
+        self.reop_loss.append(torch.mean(loss[:, 2]).item())
 
 
     def save_plots(self):
@@ -442,6 +458,7 @@ class LossTracker:
 
         plt.plot(self.vs_loss, label='VS loss')
         plt.plot(self.dm_loss, label='DM loss')
+        plt.plot(self.reop_loss, label='Reop loss')
         plt.plot(self.total_loss, label='All loss (mean)')
         # plt.plot(self.total_loss, label='Total loss')
         plt.legend()

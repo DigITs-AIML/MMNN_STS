@@ -1,0 +1,121 @@
+import torch
+import torch.nn as nn
+
+class GradientBlender:
+
+    '''
+    Implements gradient blending outlined in What Makes Training Multi-modal Classification Networks Hard? https://arxiv.org/pdf/1905.12681.pdf , Facebook AI
+
+    Usage:
+        This class forms a wrapper around your loss function
+
+    '''
+    def __init__(self, loss_function, survival=False, reduction='sum'):
+        self.loss_function = loss_function
+        self.weights = None # Need some form of initial weights
+        self.reduction = reduction.lower()
+        self.survival = survival
+        self.lvn = None
+        self.ltn = None
+
+    def updateWeights(self, train_preds, train_targs, val_preds, val_targs):
+        train_loss = self.computeLoss(train_preds, train_targs, reduceToHeads = True)
+        val_loss = self.computeLoss(val_preds, val_targs, reduceToHeads = True)
+
+        if self.lvn is None or self.ltn is None:
+            self.weights = self.normalize(torch.ones_like(train_preds.shape[0]))
+
+        o_n = self.lvn - self.ltn
+        o_npn = val_loss - train_loss
+        delta_g = val_loss - self.lvn
+        delta_o = o_npn - o_n
+
+        gbEstimate = delta_g / torch.pow(delta_o, 2)
+
+        self.weights = self.normalize(gbEstimate)
+
+        self.lvn = val_loss
+        self.ltn = train_loss
+
+    def computeLoss(self, *args, **kwargs):
+         if self.survival:
+              return self.computeLossSurv(*args, **kwargs)
+         else:
+              return self.computeLossClassification(*args, **kwargs)
+         
+    def computeLossClassification(self, preds, targets, epoch, reduceToHeads=False):
+        '''
+        args:
+            preds - k+1 x N x C tensor
+                N x C prediction tensors for each modality head (+1 for multimodality output head), stacked along 0 dimension
+                N is the batch size, C is the number of classes
+            targets - N x C tensor
+                N x C Ground tensor containing ground truth values
+            epoch - current epoch number
+        
+        returns:
+            k+1 x N x C loss tensor
+        '''
+
+        # Stack the target vector to match dimensionality of prediction tensor
+        targets = torch.stack([targets for _ in range(preds.shape[0])], dim=0)
+
+        loss = self.loss_function(preds, targets)
+        loss = self.reduceToHeads(loss)
+
+        if reduceToHeads:
+             return loss
+        return self.reduce(self.weights * loss)
+             
+    def computeLossSurv(self, preds, events, durations, epoch, reduceToHeads=False):
+        pass
+
+    def reduceToHeads(self, loss):
+         '''
+         reduces loss along every dimension except the first
+         The first dimension contains one tensor for each output head, so this will return a k+1 x 1 size tensor containing reduced loss for each modality
+         (+1 for the multimodal head)
+
+         args: 
+            loss - unreduced k+1 x N x C unreduced loss tensor
+        returns
+            k+1 x 1 loss tensor containing reduced loss values for each modality (+1 for multimodal head)
+            if reduction is set to None, this function acts as a no-op 
+         '''
+         if self.reduction.startswith('sum'):
+              return torch.sum(loss, dim=(2,3))
+         elif self.reduction.startswith('mean'):
+              return torch.mean(loss, dim=(2,3))
+         elif self.reduction.startswith('none') or self.reduction is None:
+              return loss
+         else:
+              raise ValueError('Unable to reduce loss, unrecognized reduction: {}'.format(self.reduction))
+         
+    def reduce(self, loss):
+         '''
+         reduces loss along every dimension except the first
+         The first dimension contains one tensor for each output head, so this will return a k+1 x 1 size tensor containing reduced loss for each modality
+         (+1 for the multimodal head)
+
+         args: 
+            loss - unreduced k+1 x N x C unreduced loss tensor
+        returns
+            k+1 x 1 loss tensor containing reduced loss values for each modality (+1 for multimodal head)
+            if reduction is set to None, this function acts as a no-op 
+         '''
+         if self.reduction.startswith('sum'):
+              return torch.sum(loss)
+         elif self.reduction.startswith('mean'):
+              return torch.mean(loss)
+         elif self.reduction.startswith('none') or self.reduction is None:
+              return loss
+         else:
+              raise ValueError('Unable to reduce loss, unrecognized reduction: {}'.format(self.reduction))
+         
+    def normalize(self, weights):
+         '''
+         Normalizes input tensor to sum to 1
+
+         args: weights - 1D tensor containing k+1 elements corresponding to weights of each output head
+         '''
+         return nn.Softmax(weights)

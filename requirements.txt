@@ -8,6 +8,7 @@ SimpleITK
 six
 torch
 torchaudio
+torchsummary
 torchvision
 s3fs
 torch-lr-finder

@@ -1,10 +1,10 @@
 Data:
-  data_loc: '/path/to/csv_file' #path to clinical data
-  image_loc: '/path/to/image_directory' #path to image data 
-  key_loc: '/path/to/patient_key_csv' #path to patient key
-  rad_loc: '/path/to/csv_file_with_rad_features' # path to radiomics features (not implemented in this repo)
-  t1_path: 't1_folder_name' # This is appended to image_loc to point to T1 data
-  t2_path: 't2_folder_name' # This is appended to image_loc to point to T2 data
+  data_loc: 's3://path/to/patient_data.csv' #path to clinical data
+  image_loc: 's3_prefix/of/radiology/images' #path to image data within s3 bucket
+  key_loc: 's3_key/of/patient_key.csv' #path to patient key
+  rad_loc: 's3_key/of/radiomic/features' # path to radiomics features
+  t1_path: 'T1' # This is appended to image_loc to point to T1 data
+  t2_path: 'T2' # This is appended to image_loc to point to T2 data
 ImageModel:
   name: 'densenet121' # Options are 'densenet121', 'monaidensenet', 'tinydensenet', 'densenet201', 'seresnet50', 'r3d18', 'tinycnn' (see below)
     # densenet121 - Slightly modified densenet121 with customizable number of extracted features
@@ -22,45 +22,49 @@ ImageModel:
   in_channels: 2 # 1 for grayscale images (most), 3 for RGB, supports multispectral data (although it may lead to some weirdness)
   dropout_prob: 0.2 # Dropout Regularization - Float between 0 and 1. Generally don't go above 0.5, 0.2 or 0.3 are common values
 
+PathologyModel:
+  name: 'resnet50'
+  image_path: 's3_prefix/of/pathology/images'
+  num_classes: 2
+
 ClinicalModel:
   HEADERS_TO_CONVERT: # Any categorical columns should be listed here, these will be converted to one hot encoding
     - 'Sex'
-    - 'Location3'
-    - 'Diagnosis'
-    - 'Chemo (Neoadjuvant)'
+    - 'Location'
+    - 'Diagnosis from Surgical Path'
+    - 'Use of Neo-Adjuvant Chemo (Y/N)'
 
   PRE_OP_PREDICTORS: # Clinical predictors for preop model
     - 'Sex' # need to one hot encode
     - 'Age'
-    - 'Location3' # need to one hot encode
-    - 'Diagnosis' # OHE
-    - 'Chemo (Neoadjuvant)' #OHE
-    - 'TumorSize'
-    - 'TumorVolume (cm^3)'
-    - 'TumorDepth (1 = deep to fascia, 0 = superficial) '
-    - 'TumorGrade'
-    - 'Metsatpresentation'
-    - 'RT Type (0 = preop, 1 = postop'
+    - 'Location' # need to one hot encode
+    - 'Diagnosis from Surgical Path' # OHE
+    - 'Use of Neo-Adjuvant Chemo (Y/N)' #OHE
+    - 'Tumor Size (MRI)'
+    - 'Tumor Volume (cm^3) (MRI)'
+    - 'Depth (from MRI) (0=superficial, 1=deep)'
+    - '(use this for model) Tumor Grade from biopsy (low=1, high=2)'
+    - 'Mets at Presentation (0=no, 1=yes)'
+    - 'RT (0=none, 1=pre, 2=post)'
 
   POST_OP_PREDICTORS: # Clinical predictors for postop model (List only predictors specific to postop model, all preop predictors will be included)
-  # Currently unused - future investigation
     - 'Margin (negative==0, microscopically positive==1, grossly positive==2) '
     - 'Necrosis % (information not known prior to operation)'
     - 'LengthOR'
 
   TARGETS_BINARY: # Binary clinical Targets
-    - 'VitalStatus'
-    - 'Distant metastasis'
+    - 'Vital Status (1=dead, 0 = alive) '
+    - 'Distant Mets  (0 = No, 1 = Yes)'
 
   TARGETS_TIME: # Datetime Survival Targets
     - 'FUtime'
-    - 'Date of Met'
-    - 'Surgery_Date'
+    - 'Date of Distant Met'
+    - 'Date of Surgery'
 
-  SURVIVAL_START_DATE: 'Surgery_Date' # Column containing start date of followup perioid of survival analysis models
+  SURVIVAL_START_DATE: 'Date of Surgery' # Column containing start date of followup perioid
 
 RadiomicsModel:
-  RADIOMICS_EXCLUDE_COLUMNS: # Any radiomics columns you want to exclude from predictor set, we exclude diagnostic features here.
+  RADIOMICS_EXCLUDE_COLUMNS: # Any radiomics columns you want to exclude from predictor set, we exclude diagnostic and identification information here
     - 'diagnostics_Versions_PyRadiomics'
     - 'diagnostics_Versions_Numpy'
     - 'diagnostics_Versions_SimpleITK'
@@ -83,6 +87,13 @@ RadiomicsModel:
     - 'diagnostics_Mask-original_VolumeNum'
     - 'diagnostics_Mask-original_CenterOfMassIndex'
     - 'diagnostics_Mask-original_CenterOfMass'
+    - 'MRI Accession #'
+    - 'MRI Accession # (PostRT, pre-surgery MRI)'
+    - 'Anon Name'
+    - 'Case # (pulled from XNAT sheet)'
+    - 'DateOfDeath'
+    - 'Surgery_Date'
+    - 'Length of survival'
 
   RADIOMICS_LABEL_COLUMNS: # Targets for radiomics classification model
     - 'VitalStatus'
@@ -93,15 +104,15 @@ RadiomicsModel:
     - 'Time_MET'
 
 Preprocessing:
-  UID: 'MRN' # UID must be obtainable for every patient across all datasets (modalities)
+  UID: 'MRN' # UID should be obtainable for every patient across all datasets
   HEADER_PAIRS: # Relates binary targets to their datetime counterparts for survival targets
-    - ['VitalStatus', 'FUtime']
-    - ['Distant metastasis', 'Time_MET']
-  train_uid_location: './stratified_train_uids.txt' # Location of text file containing uids of patients in training set, use --split to generate new set
-  val_uid_location: './statified_val_uids.txt' # Location of text file containing uids of patients in validation set, use --split to generate new set
-  test_uid_location: './stratified_test_uids.txt'
+    - ['Vital Status (1=dead, 0 = alive) ', 'FUtime']
+    - ['Date of Distant Met', 'Time_MET']
+  train_uid_location: './train_uids.txt' # Location of text file containing uids of patients in training set, use --split to generate new set
+  val_uid_location: './val_uids.txt' # Location of text file containing uids of patients in validation set, use --split to generate new set
+  test_uid_location: './val_uids.txt'
   output_dir: 'models' # Directory where model outputs will be stored
-  num_workers: 4 # number of parallel processes for dataloading (0 for no parallelism, num_workers > batch_size just increases overhead, max should be the batch size)
+  num_workers: 0 # number of parallel processes for dataloading (0 for no parallelism, num_workers > batch_size just increases overhead, max should be the batch size)
 
 Hyperparameters: # Model hyperparameters
   epochs: 100
@@ -114,4 +125,4 @@ Hyperparameters: # Model hyperparameters
   log_interval: 100
   num_gpus: 1
   pretrained_weights: './weights/DenseNet121_BHB-10K_yAwareContrastive.pth' # Pretrained weights used for initialization prior to training
-  model_weights: '/path/to/trained_model.pth' # Trained weights used for inference / evaluation
+  model_weights: 'best_surv_model.pth' # Trained weights used for inference / evaluation

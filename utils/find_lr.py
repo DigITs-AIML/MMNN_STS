@@ -25,11 +25,7 @@ CLASSIFICATION_THRESHOLD = 0.5
 NUM_CLASSES = 3
 
 def find_lr(args, dataset):
-    '''
-    Tool for finding a decent starting point for the learning rate
-
-    See papers by Leslie Smith, https://arxiv.org/abs/1506.01186
-    '''
+    
     # is_distributed = len(args.hosts) > 1 and args.backend is not None
     is_distributed = False
     logger.debug("Distributed training - {}".format(is_distributed))

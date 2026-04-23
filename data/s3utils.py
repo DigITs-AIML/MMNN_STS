@@ -8,6 +8,9 @@ import os
 import botocore
 from data.constants import *
 from exceptions.exceptions import *
+from PIL import Image
+from PIL.TiffTags import TAGS
+import tifffile
 
 def readCSVS3(data_key):
     '''
@@ -187,6 +190,78 @@ def loadNifti(key):
         
     return image
 
+# def loadTifffile(key):
+#     '''
+#     args: key - Path to nifti file in S3 bucket
+#     returns: Numpy Array containing pixel data of patient MRI or Segmentation Mask
+    
+#     Loads 3D image volume for a single patient from S3 bucket
+    
+#     '''
+#     s3 = boto3.resource('s3')
+#     bucket = s3.Bucket(BUCKET)
+    
+#     # Create a temporary directory on the compute node
+#     # We will store all .dcm files for each patient in the temporary directory to allow for easy reading by sitk
+#     with tempfile.TemporaryDirectory() as tmpdir:
+#         object = bucket.Object(key)
+        
+#         # Sagemaker OS doesn't support filenames with separators
+#         trunc_key=key.split('/')[-1]
+#         with open('{}/{}'.format(tmpdir,trunc_key),'wb') as f:
+#             try:
+#                 object.download_fileobj(f)
+            
+#             # This shouldn't be an issue, but some patients may be getting their keys parsed incorrectly
+#             # Print statements are for debugging purposes
+#             except Exception as e:
+#                 print('Could not find {}'.format(key))
+#                 raise e
+#         img = imread('{}/{}'.format(tmpdir, trunc_key))
+#         meta_dict = {}
+#         for page in img.pages:
+#             for tag in page.tags:
+#                 meta_dict[tag.name] = tag.value
+        
+#     return img, meta_dict
+
+def loadTiff(key):
+    '''
+    args: key - Path to nifti file in S3 bucket
+    returns: Numpy Array containing pixel data of patient MRI or Segmentation Mask
+    
+    Loads 3D image volume for a single patient from S3 bucket
+    
+    '''
+    s3 = boto3.resource('s3')
+    bucket = s3.Bucket(BUCKET)
+    
+    # Create a temporary directory on the compute node
+    # We will store all .dcm files for each patient in the temporary directory to allow for easy reading by sitk
+    with tempfile.TemporaryDirectory() as tmpdir:
+        object = bucket.Object(key)
+        
+        # Sagemaker OS doesn't support filenames with separators
+        trunc_key=key.split('/')[-1]
+        with open('{}/{}'.format(tmpdir,trunc_key),'wb') as f:
+            try:
+                object.download_fileobj(f)
+            
+            # This shouldn't be an issue, but some patients may be getting their keys parsed incorrectly
+            # Print statements are for debugging purposes
+            except Exception as e:
+                print('Could not find {}'.format(key))
+                raise e
+        try:
+            img = Image.open('{}/{}'.format(tmpdir,trunc_key))
+        except Exception as e:
+            print('Failed on {}'.format(trunc_key))
+            raise e
+        meta_dict = {TAGS[key] : img.tag[key] for key in img.tag_v2}
+        
+    return img, meta_dict
+
+
 def getNiftiFilenames(prefix):
     '''
     args: prefix - string containing the prefix of search directory in the S3 bucket (ex. 'n4corrected/T1' or 'n4corrected/T2')
@@ -220,7 +295,7 @@ def getNiftiFilenames(prefix):
 
         # If its an image, add the image and the mask to the final list (leverages naming convention)
         if filename.startswith('scan_'):
-            keys = (key, key.replace('scan_', 'tumor_mask_'))
+            keys = (key, key.replace('scan_', 'mask_'))
             all_keys.append(keys)
         
     return all_keys
@@ -264,3 +339,48 @@ def readSitk(dicom_dir):
         image = image[...,0]
         
     return image
+
+def getPathologyFilenames(prefix):
+    '''
+    args: prefix - string containing the prefix of search directory in the S3 bucket (ex. 'n4corrected/T1' or 'n4corrected/T2')
+    Returns: List of tuples containing the nifti paths for each patient
+    
+    Parses the contents of the S3 bucket to provide filenames of dicom artifacts corresponding to each patient
+    The outer list contains a tuple for each patient
+    Each tuple will contain be in the format (image_path, mask_path)
+    '''
+    
+    filenames = []
+    client = boto3.client('s3')
+    all_keys = []
+
+    # Exclude some UIDs as the images break our loader (too large)
+    disallowed_uids = [
+        'S15-2839'
+    ]
+    
+    # List all objects under search directory
+    response = client.list_objects(Bucket=BUCKET, Prefix=prefix)
+    
+    s3r = boto3.resource('s3')
+    bucket = s3r.Bucket(BUCKET)
+    
+    # List all the objects in the bucket
+    files_in_bucket = list(bucket.objects.all())
+    
+    # Remove files that do not start with the given prefix
+    trimmed_file_list = [x.key for x in files_in_bucket if x.key.startswith(prefix)]
+    
+    for key in trimmed_file_list:
+        
+        # Get the filename from the key
+        filename = key.split('/')[-1]
+
+        uid = key.split('/')[-2]
+        print(uid, uid in disallowed_uids)
+
+        # If its an image, add the image and the mask to the final list (leverages naming convention)
+        if filename.endswith('.tiff') and 'mask' in key and uid not in disallowed_uids:
+            all_keys.append(key)
+        
+    return all_keys
